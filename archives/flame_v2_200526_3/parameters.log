@@ -1,0 +1,10 @@
+--- Simulation Parameters ---
+Domain: 0.02 x 0.02 m
+End Time: 0.02 s
+Mechanism: laminarflame.yaml
+Injection Velocity: 0.02 m/s
+Equivalence Ratio (Phi): 1
+Max Level: 7
+Max Level: 6
+Spark Position: (0.01, 0.001) m
+Spark Temp: 1e+07 K
