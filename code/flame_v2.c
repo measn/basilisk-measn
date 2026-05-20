@@ -11,7 +11,7 @@
 #include <time.h>
 
 // Time & Output 
-#define T_END 0.01                  // Final simulation time (s)
+#define T_END 0.05                  // Final simulation time (s)
 #define DT_MOVIE 5e-5               // Video sampling interval (s)
 #define DT_PROFILES 5e-3            // 1D profile extraction interval (s)
 
@@ -104,7 +104,6 @@ event log_parameters (i = 0) {
     fprintf (fp, "Spark Position: (%g, %g) m\n", SPARK_X, SPARK_Y);
     fprintf (fp, "Spark Temp: %g K\n", SPARK_TEMP);
     fclose (fp);
-    fprintf (stderr, "Parameters logged to parameters.log\n");
   }
 }
 
@@ -175,10 +174,11 @@ event print_log (i += 10) {
 // --- Video Output ---
 event movie (t += DT_MOVIE; t <= T_END) {         
   clear(); 
-  view (width = 800, height = 800 * (Y_LENGTH / X_LENGTH)); 
+  view (tx = -0.5, ty = -0.5, 
+        width = 800, height = 800 * (Y_LENGTH / X_LENGTH),
+        fov = 20); 
   squares ("T", min = 300, max = 4000, linear = true); 
   cells(); 
-  colorbar (format = "%.0f K", pos = {1.2, 0.0}, size = {0.8, 0.05}); 
   save ("temperature_evolution.mp4"); 
 }
 
