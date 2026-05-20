@@ -11,13 +11,13 @@
 #include <time.h>
 
 // Time & Output 
-#define T_END 0.015                  // Final simulation time (s)
-#define DT_MOVIE 1e-4               // Video sampling interval (s)
+#define T_END 0.01                  // Final simulation time (s)
+#define DT_MOVIE 5e-5               // Video sampling interval (s)
 #define DT_PROFILES 5e-3            // 1D profile extraction interval (s)
 
 // Geometry & AMR 
 #define X_LENGTH 20e-3             // Domain width (m)
-#define Y_LENGTH 50e-3              // Domain height (m)
+#define Y_LENGTH 40e-3              // Domain height (m)
 #define MAX_LEVEL 7                 // Maximum adaptive grid refinement level
 #define MIN_LEVEL 4                 // Minimum adaptive grid refinement level
 #define PROBE_X (X_LENGTH / 2.0)    // X-position for vertical profile extraction (m)
@@ -33,7 +33,7 @@
 #define SPARK_X (X_LENGTH / 2.0)    // Spark center X (m)
 #define SPARK_Y 1e-3                // Spark center Y (m)
 #define SPARK_DIAM 5e-3           // Spark diameter (m)
-#define SPARK_DUR 0.002             // Spark duration (s)
+#define SPARK_DUR 0.001             // Spark duration (s)
 #define SPARK_TEMP 1e7              // Spark temperature (K)
 
 // --- Stoichiometric data ---
@@ -176,12 +176,13 @@ event print_log (i += 10) {
   }
 }
 
+// --- Video Output ---
 event movie (t += DT_MOVIE; t <= T_END) {         
   clear(); 
-  view (tx = -0.5, ty = -0.25, width = 800, height = 400); 
+  view (width = 800, height = 800 * (Y_LENGTH / X_LENGTH)); 
   squares ("T", min = 300, max = 4000, linear = true); 
   cells(); 
-  colorbar (format = "%.0f K", pos = {0.8, -0.8}); 
+  colorbar (format = "%.0f K", pos = {1.2, 0.0}, size = {0.8, 0.05}); 
   save ("temperature_evolution.mp4"); 
 }
 
