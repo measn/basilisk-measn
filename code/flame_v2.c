@@ -161,16 +161,12 @@ event print_log (i += 10) {
   }
   
   if (pid() == 0) {
-    // Récupération de l'heure système
     time_t rawtime;
     struct tm * timeinfo;
-    char buffer[9]; // Pour le format "HH:MM:SS"
-
+    char buffer[9]; // format "HH:MM:SS"
     time(&rawtime);
     timeinfo = localtime(&rawtime);
     strftime(buffer, sizeof(buffer), "%H:%M:%S", timeinfo);
-
-    // Affichage avec l'heure en début de ligne
     fprintf (stderr, "[%s] Ite: %d | t: %e | dt: %e | Cells: %ld | T_max: %.2f K\n", 
              buffer, i, t, dt, grid->tn, max_T);
   }
@@ -218,10 +214,6 @@ event vertical_profiles (t += DT_PROFILES; t <= T_END) {
 #if TREE 
 event adapt (i++) {
   scalar fuel = gas->YList[index_species ("H2")];
-  // Augmentation des seuils pour limiter le raffinement inutile
-  // fuel: 1e-2 -> 2e-2
-  // T:    1e0  -> 5e0 (plus tolérant)
-  // u:    1e-1 -> 2e-1 (plus tolérant)
   adapt_wavelet ({fuel, gas->T, u.x, u.y},
       (double[]){2e-2, 5e0, 2e-1, 2e-1}, MAX_LEVEL, MIN_LEVEL);
 }
