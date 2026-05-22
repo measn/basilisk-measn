@@ -11,28 +11,28 @@
 #include <time.h>
 
 // Time & Output 
-#define T_END 0.05                  // Final simulation time (s)
-#define DT_MOVIE 5e-5               // Video sampling interval (s)
-#define DT_PROFILES 5e-3            // 1D profile extraction interval (s)
+#define T_END 0.02                  // Final simulation time (s)
+#define DT_MOVIE 4e-5                  // Video sampling interval (s)
+#define DT_PROFILES 1e-3             // 1D profile extraction interval (s)
 
 // Geometry & AMR 
-#define X_LENGTH 20e-3             // Domain width (m)
-#define Y_LENGTH 40e-3              // Domain height (m)
-#define MAX_LEVEL 7                 // Maximum adaptive grid refinement level
+#define X_LENGTH 50e-3              // Domain width (m)
+#define Y_LENGTH 20e-3              // Domain height (m)
+#define MAX_LEVEL 8                 // Maximum adaptive grid refinement level
 #define MIN_LEVEL 4                 // Minimum adaptive grid refinement level
 #define PROBE_X (X_LENGTH / 2.0)    // X-position for vertical profile extraction (m)
 
 // Chemistry & Injection 
 #define KINFOLDER "laminarflame.yaml" // Chemical mechanism file
-#define V_EVAP 1                  // Injection velocity (m/s)
-#define T_WALL 400.0                // Wall temperature (K)
-#define ERATIO 1.0                  // Equivalence ratio
+#define V_EVAP 1                      // Injection velocity (m/s)
+#define T_WALL 400.0                  // Wall temperature (K)
+#define ERATIO 1.0                    // Equivalence ratio
 
 // Spark 
 #define SPARK 1                     // 1: Enable, 0: Disable
-#define SPARK_X (X_LENGTH / 2.0)    // Spark center X (m)
-#define SPARK_Y 1e-3                // Spark center Y (m)
-#define SPARK_DIAM 5e-3           // Spark diameter (m)
+#define SPARK_X 2e-3                // Spark center X (m)
+#define SPARK_Y 2e-3                // Spark center Y (m)
+#define SPARK_DIAM 2e-3             // Spark diameter (m)
 #define SPARK_DUR 0.001             // Spark duration (s)
 #define SPARK_TEMP 1e7              // Spark temperature (K)
 
@@ -97,7 +97,7 @@ event log_parameters (i = 0) {
     fprintf (fp, "Domain: %g x %g m\n", X_LENGTH, Y_LENGTH);
     fprintf (fp, "End Time: %g s\n", T_END);
     fprintf (fp, "Mechanism: %s\n", KINFOLDER);
-    fprintf (fp, "Injection Velocity: %g m/s\n", V_EVAP);
+    fprintf (fp, "Injection Velocity: %f m/s\n", V_EVAP);
     fprintf (fp, "Equivalence Ratio (Phi): %g\n", ERATIO);
     fprintf (fp, "Max Level: %d\n", MAX_LEVEL);
     fprintf (fp, "Max Level: %d\n", MIN_LEVEL);
@@ -174,11 +174,8 @@ event print_log (i += 10) {
 // --- Video Output ---
 event movie (t += DT_MOVIE; t <= T_END) {         
   clear(); 
-  view (tx = -0.5, ty = -0.5, 
-        width = 800, height = 800 * (Y_LENGTH / X_LENGTH),
-        fov = 20); 
+  view (tx = -0.5, ty = -0.5);
   squares ("T", min = 300, max = 4000, linear = true); 
-  cells(); 
   save ("temperature_evolution.mp4"); 
 }
 
@@ -187,9 +184,8 @@ event vertical_profiles (t += DT_PROFILES; t <= T_END) {
   
   if (pid() == 0) { 
     char filename[80];
-    sprintf (filename, "VerticalProfile_t_%.4f.dat", t); 
-    fp = fopen (filename, "w"); 
-    fprintf (fp, "# y(m)  T(K)  Y_H2  Y_H2O  u_y(m/s)\n"); 
+    sprintf (filename, "profiles_t_%.4f.h5", t); 
+    fp = fopen (filename, "wb"); 
   }
   
   scalar fuel = gas->YList[index_species ("H2")]; 
@@ -202,11 +198,40 @@ event vertical_profiles (t += DT_PROFILES; t <= T_END) {
     double V_y = interpolate (u.y, PROBE_X, y_p);    
     
     if (pid() == 0 && T_p != nodata) { 
-      fprintf (fp, "%e  %1.4f  %e  %e  %e\n", y_p, T_p, Y_F, Y_W, V_y);
+      fwrite (&y_p, sizeof(double), 1, fp);
+      fwrite (&T_p, sizeof(double), 1, fp);
+      fwrite (&Y_F, sizeof(double), 1, fp);
+      fwrite (&Y_W, sizeof(double), 1, fp);
+      fwrite (&V_y, sizeof(double), 1, fp);
     }
   }
   
   if (pid() == 0) { 
+    fclose (fp);
+  }
+}
+
+event temperature_profile (t += DT_PROFILES; t <= T_END) {
+  FILE * fp = NULL;
+  
+  if (pid() == 0) {
+    char filename[80];
+    sprintf (filename, "temp_profile_full_t_%.4f.dat", t);
+    fp = fopen (filename, "w");
+    fprintf (fp, "# x (m) | y (m) | T (K)\n");
+  }
+  
+  for (double x_p = 0.; x_p <= X_LENGTH; x_p += X_LENGTH/200.) {
+    for (double y_p = 0.; y_p <= Y_LENGTH; y_p += Y_LENGTH/100.) {
+      double T_p = interpolate (gas->T, x_p, y_p);
+      
+      if (pid() == 0 && T_p != nodata) {
+        fprintf (fp, "%e %e %e\n", x_p, y_p, T_p);
+      }
+    }
+  }
+  
+  if (pid() == 0) {
     fclose (fp);
   }
 }
@@ -218,4 +243,3 @@ event adapt (i++) {
       (double[]){2e-2, 5e0, 2e-1, 2e-1}, MAX_LEVEL, MIN_LEVEL);
 }
 #endif
-
