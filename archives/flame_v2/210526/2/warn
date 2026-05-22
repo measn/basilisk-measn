@@ -1,0 +1,2 @@
+flame_v2.c: In function ‘log_parameters’:
+flame_v2.c:100:18: warning: format ‘%f’ expects argument of type ‘double’, but argument 3 has type ‘int’ [-Wformat=]
