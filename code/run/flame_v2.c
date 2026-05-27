@@ -9,35 +9,38 @@
 #include "spark.h"                  // Spark ignition
 #include "view.h"                   // 2D rendering
 #include <time.h>
+#include <stdlib.h> 
 
 // Time & Output 
-#define T_END 0.02                  // Final simulation time (s)
+#define T_END 0.01                  // Final simulation time (s)
 #define DT_MOVIE 4e-5                  // Video sampling interval (s)
 #define DT_PROFILES 1e-3             // 1D profile extraction interval (s)
 
 // Geometry & AMR 
-#define X_LENGTH 50e-3              // Domain width (m)
-#define Y_LENGTH 20e-3              // Domain height (m)
+#define X_LENGTH 25e-3              // Domain width (m)
+#define Y_LENGTH 25e-3              // Domain height (m)
 #define MAX_LEVEL 8                 // Maximum adaptive grid refinement level
 #define MIN_LEVEL 4                 // Minimum adaptive grid refinement level
 #define PROBE_X (X_LENGTH / 2.0)    // X-position for vertical profile extraction (m)
 
 // Chemistry & Injection 
-#define KINFOLDER "laminarflame.yaml" // Chemical mechanism file
-#define V_EVAP 1                      // Injection velocity (m/s)
+#define KINFOLDER "C3MechV4_RED.yaml" // Chemical mechanism file
+#define V_EVAP 4                      // Injection velocity (m/s)
 #define T_WALL 400.0                  // Wall temperature (K)
 #define ERATIO 1.0                    // Equivalence ratio
+#define V_side 0.0                   // Wind velocity
+
 
 // Spark 
 #define SPARK 1                     // 1: Enable, 0: Disable
 #define SPARK_X 2e-3                // Spark center X (m)
 #define SPARK_Y 2e-3                // Spark center Y (m)
-#define SPARK_DIAM 2e-3             // Spark diameter (m)
-#define SPARK_DUR 0.001             // Spark duration (s)
+#define SPARK_DIAM 4e-3             // Spark diameter (m)
+#define SPARK_DUR 0.005             // Spark duration (s)
 #define SPARK_TEMP 1e7              // Spark temperature (K)
 
 // --- Stoichiometric data ---
-#define S_STOICH 7.9365               // O2/H2 mass ratio
+#define S_STOICH 2.396                
 #define Y_O2_AIR 0.233                // O2 air mass fraction
 #define Y_N2_AIR 0.767                // N2 air mass fraction
 
@@ -47,7 +50,13 @@
 #define Y_O2_WALL   (Y_O2_AIR * F_AIR)
 #define Y_N2_WALL   (Y_N2_AIR * F_AIR)
 
-// --- Boundary Conditions ---
+scalar fuel_old[];
+scalar Sd_field[];
+
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Boundary Conditions
+// - - - - - - - - - - - - - - - - - - - - - - - -
+
 u.n[bottom] = dirichlet (V_EVAP); 
 u.t[bottom] = dirichlet (0.);     
 p[bottom]   = neumann (0.);       
@@ -56,7 +65,7 @@ u.n[top]    = neumann (0.);
 u.t[top]    = neumann (0.);
 p[top]      = dirichlet (0.);
 
-u.n[left]   = dirichlet (0.);
+u.n[left]   = dirichlet (V_side);
 u.t[left]   = neumann (0.);
 p[left]     = neumann (0.);
 
@@ -88,8 +97,10 @@ int main (int argc, char ** argv) {
   free_species_names (NS, gas_species), gas_species = NULL;
 }
 
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Parameters log 
+// - - - - - - - - - - - - - - - - - - - - - - - -
 
-// Log of the parameters
 event log_parameters (i = 0) {
   if (pid() == 0) {
     FILE * fp = fopen ("parameters.log", "w");
@@ -107,6 +118,11 @@ event log_parameters (i = 0) {
   }
 }
 
+
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Initializing
+// - - - - - - - - - - - - - - - - - - - - - - - -
+
 event init (i = 0) {
   if (!restore (file = "restart")) {
     foreach() { u.x[] = 0.; u.y[] = 0.; }
@@ -114,6 +130,13 @@ event init (i = 0) {
     restored = true;
   }
 
+  if (pid() == 0) {
+    system("rm -f ./flame_v2/*.dat");
+    system("rm -f ./flame_v2/*.png");
+    system("rm -f ./flame_v2/*.h5");
+    system("rm -f ./flame_v2/*.mp4");
+  }
+  
   double x[NS];
   for (int s = 0; s < NS; s++) x[s] = 0.;
   x[index_species ("O2")] = Y_O2_AIR;
@@ -137,7 +160,7 @@ event init (i = 0) {
   spark.phase = gas; 
 #endif
 
-  scalar fuel  = gas->YList[index_species ("H2")]; 
+  scalar fuel = gas->YList[index_species ("IC3H7OH")]; // Anciennement "H2"
   scalar oxi   = gas->YList[index_species ("O2")]; 
   scalar inert = gas->YList[index_species ("N2")]; 
   scalar T     = gas->T; 
@@ -151,7 +174,13 @@ event init (i = 0) {
   oxi[top]      = neumann (0.); 
   inert[top]    = neumann (0.); 
   T[top]        = neumann (0.); 
+
+  foreach() fuel_old[] = fuel[];
 }
+
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Logs
+// - - - - - - - - - - - - - - - - - - - - - - - -
 
 event print_log (i += 10) {
   double max_T = 0.;
@@ -171,45 +200,62 @@ event print_log (i += 10) {
   }
 }
 
-// --- Video Output ---
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Trying to compute flame speed 
+// - - - - - - - - - - - - - - - - - - - - - - - -
+
+event compute_flame_speed (i++) {
+  scalar fuel = gas->YList[index_species ("IC3H7OH")];
+  foreach() {
+    double grad_x = (fuel[1,0] - fuel[-1,0]) / (2.*Delta);
+    double grad_y = (fuel[0,1] - fuel[0,-1]) / (2.*Delta);
+    double grad_f = sqrt(sq(grad_x) + sq(grad_y)) + 1e-12; 
+    
+    if (grad_f > 1.0) { 
+      double dcdt = (fuel[] - fuel_old[]) / dt;
+      double u_dot_grad = u.x[] * grad_x + u.y[] * grad_y;
+      Sd_field[] = (dcdt + u_dot_grad) / grad_f;
+    } else {
+      Sd_field[] = 0.;
+    }
+  }
+  foreach() fuel_old[] = fuel[];
+}
+
+event output_sd (t += DT_PROFILES; t <= T_END) {
+  char filename[80];
+  sprintf (filename, "flame_speed_t_%.4f.dat", t);
+  FILE * fp = fopen (filename, "w");
+  
+  scalar fuel = gas->YList[index_species ("IC3H7OH")];
+  
+  foreach() {
+    // Calcul du module du gradient spatial : |grad(Y_fuel)|
+    double grad_f = sqrt(sq((fuel[1,0]-fuel[-1,0])/(2.*Delta)) + sq((fuel[0,1]-fuel[0,-1])/(2.*Delta)));
+    
+    // Écriture conditionnelle dans la zone du front de flamme
+    if (grad_f > 1.0) {
+      fprintf (fp, "%g %g %g\n", x, y, Sd_field[]);
+    }
+  }
+  fclose (fp);
+}
+
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Video Output
+// - - - - - - - - - - - - - - - - - - - - - - - -
+
 event movie (t += DT_MOVIE; t <= T_END) {         
   clear(); 
   view (tx = -0.5, ty = -0.5);
-  squares ("T", min = 300, max = 4000, linear = true); 
+  squares ("T", min = 300, max = 5000, linear = true); 
   save ("temperature_evolution.mp4"); 
 }
 
-event vertical_profiles (t += DT_PROFILES; t <= T_END) {
-  FILE * fp = NULL;
-  
-  if (pid() == 0) { 
-    char filename[80];
-    sprintf (filename, "profiles_t_%.4f.h5", t); 
-    fp = fopen (filename, "wb"); 
-  }
-  
-  scalar fuel = gas->YList[index_species ("H2")]; 
-  scalar h2o  = gas->YList[index_species ("H2O")]; 
 
-  for (double y_p = 0.; y_p <= Y_LENGTH; y_p += Y_LENGTH/100.) { 
-    double T_p = interpolate (gas->T, PROBE_X, y_p); 
-    double Y_F = interpolate (fuel, PROBE_X, y_p);   
-    double Y_W = interpolate (h2o, PROBE_X, y_p);    
-    double V_y = interpolate (u.y, PROBE_X, y_p);    
-    
-    if (pid() == 0 && T_p != nodata) { 
-      fwrite (&y_p, sizeof(double), 1, fp);
-      fwrite (&T_p, sizeof(double), 1, fp);
-      fwrite (&Y_F, sizeof(double), 1, fp);
-      fwrite (&Y_W, sizeof(double), 1, fp);
-      fwrite (&V_y, sizeof(double), 1, fp);
-    }
-  }
-  
-  if (pid() == 0) { 
-    fclose (fp);
-  }
-}
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Logging temperature field
+// - - - - - - - - - - - - - - - - - - - - - - - -
 
 event temperature_profile (t += DT_PROFILES; t <= T_END) {
   FILE * fp = NULL;
@@ -236,9 +282,14 @@ event temperature_profile (t += DT_PROFILES; t <= T_END) {
   }
 }
 
+
+// - - - - - - - - - - - - - - - - - - - - - - - -
+// Adaptative mesh
+// - - - - - - - - - - - - - - - - - - - - - - - -
+
 #if TREE 
 event adapt (i++) {
-  scalar fuel = gas->YList[index_species ("H2")];
+  scalar fuel = gas->YList[index_species ("IC3H7OH")];
   adapt_wavelet ({fuel, gas->T, u.x, u.y},
       (double[]){2e-2, 5e0, 2e-1, 2e-1}, MAX_LEVEL, MIN_LEVEL);
 }
