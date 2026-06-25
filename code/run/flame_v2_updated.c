@@ -12,9 +12,9 @@
 #include <stdlib.h>
 
 // Time & Output 
-#define T_END 0.020                  // Final simulation time (s)
+#define T_END 0.005                  // Final simulation time (s)
 #define DT_MOVIE 1e-5                  // Video sampling interval (s)
-#define DT_PROFILES 2e-4             // 1D profile extraction interval (s)
+#define DT_PROFILES 1e-5             // 1D profile extraction interval (s)
 
 // Geometry & AMR 
 #define X_LENGTH 30e-3              // Domain width (m)
@@ -36,7 +36,7 @@
 #define SPARK_Y 2e-3                // Spark center Y (m)
 #define SPARK_DIAM 2e-3             // Spark diameter (m)
 #define SPARK_DUR 2e-3              // Spark duration (s)
-#define SPARK_TEMP 1e7              // Spark temperature (K)
+#define SPARK_TEMP 1e5              // Spark temperature (K)
 
 // Stoichiometric data
 #define Y_O2_AIR 0.233                // O2 air mass fraction
@@ -55,22 +55,30 @@ scalar omega_h2o[];        // H2O Production Rate(kg/m³/s)
 scalar omega_oh[];         // OH Production Rate (kg/m³/s)
 
 
-// Boundary Conditions
+// --- Boundary Conditions ---
+// INLET (Bas)
 u.n[bottom] = dirichlet (V_EVAP); 
 u.t[bottom] = dirichlet (0.);     
 p[bottom]   = neumann (0.);       
+pf[bottom]  = neumann (0.);
 
+// OUTLET (Haut) - Sortie libre parfaite
 u.n[top]    = neumann (0.);
 u.t[top]    = neumann (0.);
 p[top]      = dirichlet (0.);
+pf[top]     = dirichlet (0.); 
 
+// WALL / SYMMETRY (Gauche)
 u.n[left]   = dirichlet (0.);   
 u.t[left]   = neumann (0.);     
 p[left]     = neumann (0.);     
+pf[left]    = neumann (0.);
 
-u.n[right]  = neumann (0.);
-u.t[right]  = neumann (0.);
-p[right]    = dirichlet (0.);
+// WALL / SYMMETRY (Droite) - Retour à la normale
+u.n[right]  = dirichlet(0.); 
+u.t[right]  = neumann(0.);   
+p[right]    = neumann(0.);
+pf[right]   = neumann(0.);
 
 int maxlevel, minlevel = MIN_LEVEL; 
 bool restored = false;              
@@ -88,12 +96,14 @@ int main (int argc, char ** argv) {
   G.y = -9.81;    
   CFL_MAX = 0.25;  
 
-  for (maxlevel = MAX_LEVEL; maxlevel <= MAX_LEVEL; maxlevel++) {
-    init_grid (1 << maxlevel); 
-    run();
-  }
+  TOLERANCE = 1e-4; 
+  NITERMAX = 100;   
 
+  init_grid (1 << MAX_LEVEL); 
+  run();
   free_species_names (NS, gas_species), gas_species = NULL;
+  
+  return 0;
 }
 
 // Parameters log 
@@ -146,9 +156,9 @@ event init (i = 0) {
 #endif
 
   scalar fuel = gas->YList[index_species ("H2")]; 
-  scalar oxi   = gas->YList[index_species ("O2")]; 
-  scalar inert = gas->YList[index_species ("N2")]; 
-  scalar T     = gas->T; 
+  scalar oxi  = gas->YList[index_species ("O2")]; 
+  scalar inert= gas->YList[index_species ("N2")]; 
+  scalar T    = gas->T; 
 
   fuel[bottom]  = dirichlet (F_FUEL);
   oxi[bottom]   = dirichlet (0.);
@@ -161,16 +171,48 @@ event init (i = 0) {
   T[top]        = neumann (0.); 
 
   foreach() fuel_old[] = fuel[];
+  
+  // --- CORRECTIONS CRITIQUES POUR t=0 ---
+  
+  // 1. Appliquer les nouvelles conditions de limites scalaires aux cellules fantômes
+  boundary((scalar *){fuel, oxi, inert, T});
+  boundary(all);
+  
+  // 2. Mettre à jour la densité et les propriétés de transport AVANT le solveur
+  // Si votre combustion.h possède une routine spécifique, appelez-la ici.
+  // Sinon, c'est généralement :
+  // update_thermodynamics(); ou équivalent
 }
 
 // ASCII logs to monitor
 event print_log (i += 10) {
-  double max_T = 0., max_hrr = 0.;
-  foreach(reduction(max:max_T) reduction(max:max_hrr)) { 
-    if (gas->T[] > max_T) max_T = gas->T[]; 
-    if (hrr[] > max_hrr) max_hrr = hrr[];
-  }
+  double max_T = -1e30, min_T = 1e30;
+  double max_hrr = -1e30, min_hrr = 1e30;
   
+  long local_cells = 0;
+  foreach(serial) {
+    local_cells++;
+  }
+
+  foreach(reduction(max:max_T) reduction(min:min_T) 
+          reduction(max:max_hrr) reduction(min:min_hrr)) { 
+    
+    if (gas->T[] > max_T) max_T = gas->T[]; 
+    if (gas->T[] < min_T) min_T = gas->T[];
+    
+    if (hrr[] > max_hrr) max_hrr = hrr[];
+    if (hrr[] < min_hrr) min_hrr = hrr[];
+  }
+
+  long min_cells = local_cells;
+  long max_cells = local_cells;
+
+#if _MPI
+  MPI_Reduce(&local_cells, &min_cells, 1, MPI_LONG, MPI_MIN, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&local_cells, &max_cells, 1, MPI_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+#endif
+
+  // 4. Affichage centralisé sur le processus maître
   if (pid() == 0) {
     time_t rawtime;
     struct tm * timeinfo;
@@ -178,8 +220,47 @@ event print_log (i += 10) {
     time(&rawtime);
     timeinfo = localtime(&rawtime);
     strftime(buffer, sizeof(buffer), "%H:%M:%S", timeinfo);
-    fprintf (stderr, "[%s] Ite: %d | t: %e | dt: %e | Cells: %ld | T_max: %.2f K | HRR_max: %.2e W/m³\n", 
-             buffer, i, t, dt, grid->tn, max_T, max_hrr);
+
+    fprintf (stderr, 
+             "[%s] Ite: %d | t: %e | dt: %e | Cells/core [min-max]: %ld-%ld (Tot: %ld) | T [min-max]: %.2f-%.2f K | HRR [min-max]: %.2e-%.2e W/m³\n", 
+             buffer, i, t, dt, min_cells, max_cells, grid->tn, min_T, max_T, min_hrr, max_hrr);
+  }
+}
+
+// Événement de sécurité thermodynamique (Pur Écrêtage)
+// Exécuté à chaque pas de temps pour nettoyer les artefacts de dispersion numérique
+event thermodynamic_safeguard (i++) {
+  
+  // 1. Alias local pour éviter les conflits OpenMP/MPI avec qcc
+  scalar T_gas = gas->T;
+  
+  foreach() {
+    // Blocage strict de l'undershoot thermique pour les polynômes NASA
+    if (T_gas[] < 300.0) {
+      T_gas[] = 300.0;
+    }
+    // Sécurité haute optionnelle (à ajuster selon votre flamme)
+    else if (T_gas[] > 4000.0) {
+      T_gas[] = 4000.0;
+    }
+  }
+  // Mise à jour immédiate des cellules fantômes pour la température
+  boundary({T_gas});
+
+  // 2. Traitement indépendant des espèces chimiques
+  for (int k = 0; k < NS; k++) {
+    scalar Yk = gas->YList[k];
+    foreach() {
+      // Blocage des fractions massiques négatives uniquement
+      // AUCUNE normalisation n'est effectuée ici pour préserver la cohérence de rho
+      if (Yk[] < 0.0) {
+        Yk[] = 0.0;
+      }
+      else if (Yk[] > 1.0) {
+        Yk[] = 1.0;
+      }
+    }
+    boundary({Yk});
   }
 }
 
@@ -406,16 +487,29 @@ event snapshot_vtu (t += DT_PROFILES; t <= T_END) {
 event movie (t += DT_MOVIE; t <= T_END) {         
   clear(); 
   view (tx = -0.5, ty = -0.5);
-  squares ("T", min = 300, max = 5000, linear = true); 
+  squares ("T", min = 300, max = 3000, linear = true); 
   save ("temperature_evolution.mp4"); 
 }
 
 // Adaptive mesh
 #if TREE 
 event adapt (i++) {
-  scalar fuel = gas->YList[index_species ("H2")];
-  // Tolérance thermique passée de 5 K à 50 K
-  adapt_wavelet ({fuel, gas->T, u.x, u.y},
-      (double[]){2e-2, 50.0, 2e-1, 2e-1}, MAX_LEVEL, MIN_LEVEL);
+  // Alias locaux (bonne pratique)
+  scalar T_gas = gas->T;
+  scalar Y_H2  = gas->YList[index_species("H2")];
+  scalar Y_OH  = gas->YList[index_species("OH")];
+
+  // Ajout d'une tolérance adaptative
+  // L'idée est de raffiner plus fort sur le front de flamme (OH) 
+  // et plus lâchement sur la vitesse pour éviter les instabilités.
+  adapt_wavelet ((scalar *){T_gas, Y_H2, Y_OH, u.x, u.y},
+                 (double[]){5.0, 5e-4, 5e-5, 0.1, 0.1}, 
+                 maxlevel = MAX_LEVEL, 
+                 minlevel = MIN_LEVEL);
+                 
+  // CRUCIAL : Forcer la mise à jour des frontières après l'adaptation
+  // car l'AMR redistribue les cellules entre les processus MPI
+  boundary(all);
 }
 #endif
+

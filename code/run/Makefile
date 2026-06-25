@@ -14,5 +14,8 @@ CFLAGS += -O2 \
 	-disable-dimensions \
 	-I$(EXT_PATH) \
 	-I/home/measn/projects/ecipriano/src \
+	-I/usr/include/hdf5/serial \
+
+LDFLAGS = -lhdf5 -lhdf5_hl
 
 include Makefile.dynamic
