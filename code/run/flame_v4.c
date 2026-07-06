@@ -14,24 +14,39 @@
 
 // --- Physical and Domain Parameters ---
 #define DOMAIN_SIZE     20e-3        // Domain width/height (meters)
-#define MAX_LEVEL       9            // Maximum grid refinement level
+#define MAX_LEVEL       10            // Maximum grid refinement level
 #define MIN_LEVEL       6            // Minimum grid refinement level
 
 // --- Simulation Constants ---
-#define T_END           0.015         // Final time (seconds)
+#define T_END           0.01         // Final time (seconds)
 #define CFL_MAX         0.1         // Stability criterion
 #define P_ATM           101325.0     // Atmospheric pressure (Pa)
 #define T_INITIAL       300.0        // Initial gas temperature (K)
 
 // --- Simulation Parameters ---
-#define V_INJ 1                  // Injection speed (m/s) 
+#define V_INJ 0.020                  // Injection speed (m/s) 
 #define F_FUEL 1                     // Fuel Ratio
-#define T_RESIDENCE 0.002
+#define T_RESIDENCE 0.005
 #define DT 0.0001
 #define Y_flame 3e-3
+#define X_FLAME 1e-3
 
 // --- Chemistry Mechanism ---
 #define KIN_MECHANISM   "GRI30_RED.yaml"
+
+// ===================================================================
+// --- Paramètres de Stratification (Config 3) ---
+// ===================================================================
+#define PHI_BOTTOM 3.0     
+#define PHI_TOP    0.0      
+#define Y_STRAT    20e-3    
+
+// --- valeurs pour les conditions aux limites ---
+#define MASS_TOT_B (16.04 * (PHI_BOTTOM) + 274.654)
+#define Y_CH4_B    ((16.04 * (PHI_BOTTOM)) / MASS_TOT_B)
+#define Y_O2_B     (63.996 / MASS_TOT_B)
+#define Y_N2_B     (210.658 / MASS_TOT_B)
+
 
 // Déclaration du champ scalaire pour le Heat Release Rate
 scalar HRR[];
@@ -45,9 +60,16 @@ int maxlevel, minlevel = MIN_LEVEL;
   // 0 : Gaz frais du CSV (Cohérence parfaite avec la flamme)
   // 1 : Prémélange CH4/Air Stoechiométrique (Phi = 1.0) partout
   // 2 : Air pur dans le domaine, Injection de CH4 pur par le bas
-  // 3 : Prémélange stratifié (Phi de 1.4 en bas à 0.6 en haut)
+  // 3 : Prémélange stratifié (Phi de 10 en bas à 0 en haut)
 
-int bg_config = 2; 
+int bg_config = 3; 
+
+// ===================================================================
+// --- TOGGLE GLOBAL : CONFIGURATION DE LA FLAMME D'ALLUMAGE ---
+// ===================================================================
+// 0 : Demi-sphère (centrée en x=0, y=center_y)
+// 1 : Rectiligne verticale (front plan parallèle à l'axe y)
+int ign_config = 1; 
 
 // --- CONDITIONS AUX LIMITES ---
 
@@ -289,33 +311,27 @@ event init_0 (i = 0) {
   // Initialisation globale sur le maillage
   foreach() { 
       if (bg_config == 3) {
-          // --- CONFIGURATION 3 : STRATIFICATION SPATIALE ---
-          T[] = 300.0; // Température uniforme
-          
-          // Calcul de la richesse locale (interpolation linéaire sur y)
-          // y = 0 -> phi = 1.4 | y = DOMAIN_SIZE -> phi = 0.6
-          double phi = 1.4 - (0.8 * y / DOMAIN_SIZE);
-          
-          double mass_tot = 16.04 * phi + 274.654;
-          
-          // CORRECTION : On utilise le pointeur local YList et on crée un scalaire local
-          for (int s = 0; s < NS; s++) {
-              scalar Y = YList[s];
-              Y[] = 0.0;
-          }
-          if (iCH4 != -1) {
-              scalar Y_CH4 = YList[iCH4];
-              Y_CH4[] = (16.04 * phi) / mass_tot;
-          }
-          if (iO2  != -1) {
-              scalar Y_O2 = YList[iO2];
-              Y_O2[]  = 63.996 / mass_tot;
-          }
-          if (iN2  != -1) {
-              scalar Y_N2 = YList[iN2];
-              Y_N2[]  = 210.658 / mass_tot;
-          }
-          
+            T[] = 300.0;
+            
+            double phi;
+            if (y <= Y_STRAT) {
+                phi = PHI_BOTTOM - (PHI_BOTTOM - PHI_TOP) * (y / Y_STRAT);
+            } 
+            else {
+                phi = PHI_TOP;
+            }
+            
+            if (phi < 0.0) phi = 0.0;
+            
+            double mass_tot = 16.04 * phi + 274.654;
+            
+            for (int s = 0; s < NS; s++) {
+                scalar Y = YList[s];
+                Y[] = 0.0;
+            }
+            if (iCH4 != -1) { scalar Y_CH4 = YList[iCH4]; Y_CH4[] = (16.04 * phi) / mass_tot; }
+            if (iO2  != -1) { scalar Y_O2  = YList[iO2];  Y_O2[]  = 63.996 / mass_tot; }
+            if (iN2  != -1) { scalar Y_N2  = YList[iN2];  Y_N2[]  = 210.658 / mass_tot; }
       } else {
           // --- CONFIGURATIONS UNIFORMES ---
           T[] = T_bg;
@@ -329,7 +345,7 @@ event init_0 (i = 0) {
       u.x[] = 0.; 
       u.y[] = 0.;
       p[]   = 0.;
-  }
+  } // Fin du foreach proprement fermée
 
   boundary((scalar *){u.x, u.y, p});
 
@@ -359,40 +375,56 @@ event init_0 (i = 0) {
               else { Y[bottom] = dirichlet(0.0); }
           }
           else if (bg_config == 3) {
-              
               if (s == iCH4) { 
-                  Y[bottom] = dirichlet(0.075581); 
+                  Y[bottom] = dirichlet(Y_CH4_B); 
               } 
               else if (s == iO2) { 
-                  Y[bottom] = dirichlet(0.215395); 
+                  Y[bottom] = dirichlet(Y_O2_B); 
               } 
               else if (s == iN2) { 
-                  Y[bottom] = dirichlet(0.709024); 
+                  Y[bottom] = dirichlet(Y_N2_B); 
               } 
               else { 
                   Y[bottom] = dirichlet(0.0); 
               }
           }
-      }
-  }
-
-  // 3. Overlay local : On "peint" la demi-sphère de flamme
+      } 
+  } 
+  
+  // 4. Overlay local : On "peint" la flamme d'allumage
   double R_flame = 2.5e-3; 
   double center_y = Y_flame; 
 
   foreach() {
-    double r = sqrt(sq(x) + sq(y - center_y));
-    
-    if (r <= R_flame && x >= 0.0) {
-      double x_csv = R_flame - r;
-      
-      T[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
-      
-      for (int s = 0; s < NS; s++) {
-          scalar Y = YList[s];
-          Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
+      bool in_flame = false;
+      double x_csv = 0.0;
+
+      // Choix de la géométrie
+      if (ign_config == 0) {
+          // Config 0 : Demi-sphère (R_flame est ici le RAYON)
+          double r = sqrt(sq(x) + sq(y - center_y));
+          if (r <= R_flame && x >= 0.0) {
+              in_flame = true;
+              x_csv = R_flame - r;
+          }
+      } 
+      else if (ign_config == 1) {
+          // Config 1 : Flamme rectiligne verticale
+          // ON REMPLACE R_flame PAR X_FLAME
+          if (x <= X_FLAME && x >= 0.0) {
+              in_flame = true;
+              x_csv = X_FLAME - x; // Le front est maintenant à X_FLAME
+          }
       }
-    }
+
+      // Application du profil si on est dans la zone d'allumage
+      if (in_flame) {
+          T[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
+          for (int s = 0; s < NS; s++) {
+              scalar Y = YList[s];
+              Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
+          }
+      }
   }
 
   // 4. Clôture et nettoyage
@@ -414,37 +446,6 @@ event init_0 (i = 0) {
   }
   boundary ((scalar *){alpha.x, alpha.y});
 }
-
-// -------------------------------------------------------------------
-//  Temps de résidence de la flamme 
-// -------------------------------------------------------------------
-
-event flame_residence (t <= T_RESIDENCE) {
-  scalar T = gas->T;
-  scalar * YList = gas->YList;
-
-  double R_flame = 1e-3; 
-  double center_y = Y_flame; 
-
-  foreach() {
-    double r = sqrt(sq(x) + sq(y - center_y));
-    
-    if (r <= R_flame && x >= 0.0) {
-      double x_csv = R_flame - r;
-      T[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
-      
-      for (int s = 0; s < NS; s++) {
-          scalar Y = YList[s];
-          Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
-      }
-    }
-  }
-
-  boundary({T});
-  boundary(YList);
-  sanitize_fractions(YList);
-}
-
 
 // =================================================================
 // --- ADAPTATION DE MAILLAGE (Optimisé pour CH4) ---
@@ -483,31 +484,30 @@ event adapt (i++) {
 event compute_hrr (i++) {
     int ns = NS; 
     
-    // 1. On crée des alias locaux AVANT la boucle pour aider le compilateur Basilisk
+    // 1. Alias locaux AVANT la boucle pour éviter les erreurs "parse error" de qcc
     scalar * YList = gas->YList;
     scalar T_gas = gas->T;
     
     foreach() {
         double ymass[ns];
-        double hm[ns];    
-        double wdot[ns];  
+        double hm[ns];    // Enthalpies molaires [J/kmol]
+        double wdot[ns];  // Taux de production [kmol/m^3/s]
         
-        // 2. Utilisation d'un alias de scalaire très simple pour la lecture
+        // 2. Lecture propre des fractions massiques avec l'alias
         for (int s = 0; s < ns; s++) {
             scalar Y = YList[s];
             ymass[s] = Y[]; 
         }
         
-        // 3. Mise à jour avec l'alias T_gas[] (très lisible pour le préprocesseur)
+        // 3. Appel de l'API Cantera (via chemistry.h)
         thermo_setTemperature(thermo, T_gas[]);
         thermo_setPressure(thermo, P_ATM); 
         thermo_setMassFractions(thermo, ns, ymass, 1);
         
-        // 4. Récupération des propriétés exactes
         thermo_getPartialMolarEnthalpies(thermo, ns, hm); 
         kin_getNetProductionRates(kin, ns, wdot);
         
-        // 5. Calcul du Heat Release Rate
+        // 4. Calcul du HRR en W/m^3
         double hrr_local = 0.0;
         for (int s = 0; s < ns; s++) {
             hrr_local -= wdot[s] * hm[s];
@@ -516,6 +516,7 @@ event compute_hrr (i++) {
         HRR[] = hrr_local;
     }
     
+    // 5. Mise à jour des frontières MPI
     boundary({HRR}); 
 }
 
@@ -641,6 +642,10 @@ event snapshot_vtu (t += DT; t <= T_END) {
     foreach() fprintf(fp, "%.8g %.8g 0.0\n", isfinite(u.x[]) ? u.x[] : 0.0, isfinite(u.y[]) ? u.y[] : 0.0);
     fprintf(fp, "        </DataArray>\n");
 
+    fprintf(fp, "        <DataArray type=\"Float64\" Name=\"HRR\" format=\"ascii\">\n");
+    foreach() fprintf(fp, "%.8g\n", HRR[]);
+    fprintf(fp, "        </DataArray>\n");  
+
     // Espèces chimiques avec noms nettoyés
     for (int s = 0; s < NS; s++) {
         char safe_name[256];
@@ -651,7 +656,8 @@ event snapshot_vtu (t += DT; t <= T_END) {
         foreach() fprintf(fp, "%.8g\n", isfinite(Y[]) ? Y[] : 0.0);
         fprintf(fp, "        </DataArray>\n");
     }
-    fprintf(fp, "      </CellData>\n");
+    
+    fprintf(fp, "      </CellData>\n"); 
 
     fprintf(fp, "        <DataArray type=\"Float64\" Name=\"HRR\" format=\"ascii\">\n");
     foreach() fprintf(fp, "%.8g\n", HRR[]);
