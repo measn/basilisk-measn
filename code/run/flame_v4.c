@@ -13,33 +13,33 @@
 
 
 // --- Physical and Domain Parameters ---
-#define DOMAIN_SIZE     20e-3        // Domain width/height (meters)
-#define MAX_LEVEL       10            // Maximum grid refinement level
-#define MIN_LEVEL       6            // Minimum grid refinement level
+#define DOMAIN_SIZE     60e-3        // Domain width/height (meters)
+#define MAX_LEVEL       12            // Maximum grid refinement level
+#define MIN_LEVEL       7            // Minimum grid refinement level
 
 // --- Simulation Constants ---
-#define T_END           0.01         // Final time (seconds)
-#define CFL_MAX         0.1         // Stability criterion
+#define T_END           0.5         // Final time (seconds)
+#define CFL_MAX         0.2         // Stability criterion
 #define P_ATM           101325.0     // Atmospheric pressure (Pa)
 #define T_INITIAL       300.0        // Initial gas temperature (K)
 
 // --- Simulation Parameters ---
-#define V_INJ 0.020                  // Injection speed (m/s) 
+#define V_INJ 0.1                  // Injection speed (m/s) 
 #define F_FUEL 1                     // Fuel Ratio
-#define T_RESIDENCE 0.005
+#define T_RESIDENCE 0.003
 #define DT 0.0001
-#define Y_flame 3e-3
-#define X_FLAME 1e-3
-
+#define Y_flame 1e-3
+#define X_FLAME 2e-3
+#define R_FLAME 1e-3
 // --- Chemistry Mechanism ---
 #define KIN_MECHANISM   "GRI30_RED.yaml"
 
 // ===================================================================
 // --- Paramètres de Stratification (Config 3) ---
 // ===================================================================
-#define PHI_BOTTOM 3.0     
+#define PHI_BOTTOM 10.0     
 #define PHI_TOP    0.0      
-#define Y_STRAT    20e-3    
+#define Y_STRAT    50e-3    
 
 // --- valeurs pour les conditions aux limites ---
 #define MASS_TOT_B (16.04 * (PHI_BOTTOM) + 274.654)
@@ -50,6 +50,8 @@
 
 // Déclaration du champ scalaire pour le Heat Release Rate
 scalar HRR[];
+scalar wdot_CH4[];
+scalar S_local[]; // Vitesse de flamme locale (cm/s)
 
 // Global solver state
 int maxlevel, minlevel = MIN_LEVEL;
@@ -62,14 +64,14 @@ int maxlevel, minlevel = MIN_LEVEL;
   // 2 : Air pur dans le domaine, Injection de CH4 pur par le bas
   // 3 : Prémélange stratifié (Phi de 10 en bas à 0 en haut)
 
-int bg_config = 3; 
+int bg_config = 2; 
 
 // ===================================================================
 // --- TOGGLE GLOBAL : CONFIGURATION DE LA FLAMME D'ALLUMAGE ---
 // ===================================================================
-// 0 : Demi-sphère (centrée en x=0, y=center_y)
-// 1 : Rectiligne verticale (front plan parallèle à l'axe y)
-int ign_config = 1; 
+// 0 : Demi-sphère 
+// 1 : Rectiligne verticale 
+int ign_config = 0; 
 
 // --- CONDITIONS AUX LIMITES ---
 
@@ -95,8 +97,6 @@ u.n[right]  = dirichlet( 0. );
 u.t[right]  = dirichlet( 0. );     
 p[right]    = neumann( 0. );       
 pf[right]   = neumann( 0. );
-
-
 
 // ----------------------------------------------
 // --- Outils Thermodynamiques ---
@@ -152,7 +152,6 @@ double interpolate_1D(double x_target, double * x_array, double * y_array, int n
 }
 
 ////// structure csv
-
 void load_flame_csv(const char * filename) {
     FILE * fp = fopen(filename, "r");
     if (!fp) {
@@ -246,7 +245,7 @@ int main (int argc, char ** argv) {
     T0   = T_INITIAL;
 
     NITERMAX = 150;
-    TOLERANCE = 1e-3; 
+    TOLERANCE = 1e-2; 
 
     init_grid(1 << MIN_LEVEL);
 
@@ -277,7 +276,7 @@ event init_0 (i = 0) {
   scalar T = gas->T;
   scalar * YList = gas->YList;
 
-  double T_bg;
+  double T_bg = T_INITIAL;
   double Y_bg[NS];
   for (int s = 0; s < NS; s++) Y_bg[s] = 0.0;
 
@@ -355,9 +354,6 @@ event init_0 (i = 0) {
   }
   T.gradient = minmod2;
 
-  // ===================================================================
-  // --- CONDITIONS AUX LIMITES DYNAMIQUES (Paroi basse) ---
-  // ===================================================================
   if (bg_config == 1 || bg_config == 2 || bg_config == 3) {
       T[bottom] = dirichlet(300.0); 
       
@@ -392,7 +388,7 @@ event init_0 (i = 0) {
   } 
   
   // 4. Overlay local : On "peint" la flamme d'allumage
-  double R_flame = 2.5e-3; 
+  double R_flame = R_FLAME; 
   double center_y = Y_flame; 
 
   foreach() {
@@ -447,17 +443,82 @@ event init_0 (i = 0) {
   boundary ((scalar *){alpha.x, alpha.y});
 }
 
+// -------------------------------------------------------------------
+// --- ÉVÉNEMENT : Temps de résidence de la flamme ---
+// -------------------------------------------------------------------
+event flame_residence (t <= T_RESIDENCE) {
+  scalar T = gas->T;
+  scalar * YList = gas->YList;
+
+  double R_flame = R_FLAME;
+  double center_y = Y_flame; 
+
+  foreach() {
+        bool in_flame = false;
+        double x_csv = 0.0;
+
+        if (ign_config == 0) {
+            // Config 0 : Demi-sphère 
+            double r = sqrt(sq(x) + sq(y - center_y));
+            if (r <= R_flame && x >= 0.0) {
+                in_flame = true;
+                x_csv = R_flame - r;
+            }
+        } 
+        else if (ign_config == 1) {
+            // Config 1 : Flamme rectiligne verticale
+            if (x <= X_FLAME && x >= 0.0) {
+                in_flame = true;
+                x_csv = X_FLAME - x; 
+            }
+        }
+
+        // Application du profil si on est dans la zone d'allumage
+        if (in_flame) {
+            T[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
+            for (int s = 0; s < NS; s++) {
+                scalar Y = YList[s];
+                Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
+            }
+        }
+    }
+
+  // 1. Clôture et nettoyage des frontières MPI
+  boundary({T});
+  boundary(YList);
+  sanitize_fractions(YList);
+  
+  // 2. On force Cantera à recalculer la densité (rho) et la viscosité
+  event("properties"); 
+
+  // 3. On met à jour le volume spécifique (alpha) pour Navier-Stokes
+  foreach() {
+    if (rho[] < 0.01) {
+        rho[] = 1.0; 
+    }
+  }
+  foreach_face() {
+      double rhof = (rho[] + rho[-1]) / 2.0;
+      alpha.x[] = 1.0 / rhof; 
+  }
+  boundary ((scalar *){alpha.x, alpha.y});
+}
+
 // =================================================================
 // --- ADAPTATION DE MAILLAGE (Optimisé pour CH4) ---
 // =================================================================
 event adapt (i++) {
     scalar * list = NULL;
-    list = list_append(list, gas->T);
     
-    // 2. Identification dynamique des espèces clés pour CH4
+    // 1. Thermique ET Hydrodynamique (Crucial pour les instabilités)
+    list = list_append(list, gas->T);
+    list = list_append(list, u.x);
+    list = list_append(list, u.y);
+    
+    // 2. Identification dynamique des espèces clés
     int iCH4 = index_species("CH4");
-    int iOH  = index_species("OH"); // 
-    int iCO  = index_species("CO"); // 
+    int iOH  = index_species("OH");  // Marqueur de la zone de réaction (très fin)
+    int iCO  = index_species("CO");  // Marqueur des gaz brûlés
     
     if (iCH4 >= 0) list = list_append(list, gas->YList[iCH4]);
     if (iOH >= 0)  list = list_append(list, gas->YList[iOH]);
@@ -468,9 +529,11 @@ event adapt (i++) {
     
     // 3. Définition des métriques (Tolérances absolues)
     int idx = 0;
-    thresholds[idx++] = 15.0;  
+    thresholds[idx++] = 5.0;   // T : Plus strict (5K) pour ne pas lisser le front
+    thresholds[idx++] = 0.02;  // u.x : Raffiner si la vitesse varie de 2 cm/s
+    thresholds[idx++] = 0.02;  // u.y : Raffiner si la vitesse varie de 2 cm/s
     
-    // Les fractions massiques (Y) évoluent entre 0 et 1.
+    // Tolérances chimiques (tes valeurs étaient parfaites)
     if (iCH4 >= 0) thresholds[idx++] = 1e-3; 
     if (iOH >= 0)  thresholds[idx++] = 1e-5; 
     if (iCO >= 0)  thresholds[idx++] = 1e-4; 
@@ -480,26 +543,28 @@ event adapt (i++) {
     free (list);
 }
 
-
 event compute_hrr (i++) {
     int ns = NS; 
     
-    // 1. Alias locaux AVANT la boucle pour éviter les erreurs "parse error" de qcc
+    // 1. Alias locaux AVANT la boucle pour éviter les bugs de qcc
     scalar * YList = gas->YList;
     scalar T_gas = gas->T;
     
+    // On récupère l'index du CH4 une seule fois avant la boucle (optimisation)
+    int idx_CH4 = index_species("CH4"); 
+    
     foreach() {
         double ymass[ns];
-        double hm[ns];    // Enthalpies molaires [J/kmol]
+        double hm[ns];    // Enthalpies molaires partielles [J/kmol]
         double wdot[ns];  // Taux de production [kmol/m^3/s]
         
-        // 2. Lecture propre des fractions massiques avec l'alias
+        // 2. Lecture propre des fractions massiques locales
         for (int s = 0; s < ns; s++) {
             scalar Y = YList[s];
             ymass[s] = Y[]; 
         }
         
-        // 3. Appel de l'API Cantera (via chemistry.h)
+        // 3. Appel de l'API Cantera pour récupérer la thermo et la cinétique
         thermo_setTemperature(thermo, T_gas[]);
         thermo_setPressure(thermo, P_ATM); 
         thermo_setMassFractions(thermo, ns, ymass, 1);
@@ -512,12 +577,19 @@ event compute_hrr (i++) {
         for (int s = 0; s < ns; s++) {
             hrr_local -= wdot[s] * hm[s];
         }
-        
         HRR[] = hrr_local;
+        
+        // 5. Calcul du taux de production/consommation massique du CH4 (kg/m3/s)
+        // wdot est en kmol/m3/s, on le multiplie par la masse molaire (16.04 kg/kmol)
+        if (idx_CH4 >= 0) {
+            wdot_CH4[] = wdot[idx_CH4] * 16.04;
+        } else {
+            wdot_CH4[] = 0.0;
+        }
     }
     
-    // 5. Mise à jour des frontières MPI
-    boundary({HRR}); 
+    // 6. Mise à jour des frontières MPI pour les deux champs
+    boundary({HRR, wdot_CH4}); 
 }
 
 // =================================================================
@@ -571,6 +643,79 @@ event logfile (i += 10) {
         
         fflush(stderr);
     }
+}
+
+// =================================================================
+// --- flame speed monitoring
+// =================================================================
+event monitor_speed (i += 10) { 
+    double sum_wdot = 0.0; 
+    double A_front = 0.0; 
+    
+    // Obligatoire pour calculer un gradient spatial propre
+    boundary({gas->T}); 
+
+    foreach(reduction(+:sum_wdot) reduction(+:A_front)) {
+        // 1. Intégrale de la consommation de CH4
+        sum_wdot += wdot_CH4[] * dv();
+        
+        // 2. Calcul de la surface locale (Théorème de Co-aire)
+        double delta_T = 2220.0 - 300.0; 
+        double grad_Tx = (gas->T[1,0] - gas->T[-1,0]) / (2.0 * Delta);
+        double grad_Ty = (gas->T[0,1] - gas->T[0,-1]) / (2.0 * Delta);
+        double grad_c = sqrt(sq(grad_Tx) + sq(grad_Ty)) / delta_T;
+        
+        A_front += grad_c * dv();
+    }
+
+    if (pid() == 0) {
+        double rho_0 = 1.16;       
+        double Y_CH4_0 = 0.05518;  
+        
+        double Sc = 0.0;
+        if (A_front > 1e-6) {
+            Sc = -sum_wdot / (rho_0 * Y_CH4_0 * A_front); 
+        }
+        
+        // Ouverture du fichier en mode "append" (ajout)
+        static FILE * fp = fopen("flame_speed.csv", "w");
+        if (i == 0) {
+            // En-têtes du fichier CSV au premier pas de temps
+            fprintf(fp, "time,area_m,speed_cm_s\n");
+        }
+        // Écriture des données
+        fprintf(fp, "%g,%g,%g\n", t, A_front, Sc * 100.0);
+        fflush(fp);
+    }
+}
+
+// =================================================================
+// --- CALCUL LOCAL : Vitesse de flamme en chaque point ---
+// =================================================================
+event compute_local_speed (i++) {
+    double rho_0 = 1.16;
+    double Y_CH4_0 = 0.05518;
+    double delta_T = 2220.0 - 300.0;
+
+    boundary({gas->T, wdot_CH4, HRR});
+
+    foreach() {
+        double grad_Tx = (gas->T[1,0] - gas->T[-1,0]) / (2.0 * Delta);
+        double grad_Ty = (gas->T[0,1] - gas->T[0,-1]) / (2.0 * Delta);
+        double grad_c = sqrt(sq(grad_Tx) + sq(grad_Ty)) / delta_T;
+
+        if (HRR[] > 1e5) { 
+            // On s'assure de ne pas diviser par un gradient trop petit
+            if (grad_c > 1000.0) {
+                S_local[] = 100.0 * (-wdot_CH4[]) / (rho_0 * Y_CH4_0 * grad_c);
+            } else {
+                S_local[] = 0.0;
+            }
+        } else {
+            S_local[] = 0.0; // En dehors du front, pas de vitesse
+        }
+    }
+    boundary({S_local});
 }
 
 // =================================================================
@@ -646,6 +791,14 @@ event snapshot_vtu (t += DT; t <= T_END) {
     foreach() fprintf(fp, "%.8g\n", HRR[]);
     fprintf(fp, "        </DataArray>\n");  
 
+    fprintf(fp, "        <DataArray type=\"Float64\" Name=\"wdot_CH4\" format=\"ascii\">\n");
+    foreach() fprintf(fp, "%.8g\n", wdot_CH4[]);
+    fprintf(fp, "        </DataArray>\n"); 
+
+    fprintf(fp, "        <DataArray type=\"Float64\" Name=\"S_local\" format=\"ascii\">\n");
+    foreach() fprintf(fp, "%.8g\n", S_local[]);
+    fprintf(fp, "        </DataArray>\n");
+
     // Espèces chimiques avec noms nettoyés
     for (int s = 0; s < NS; s++) {
         char safe_name[256];
@@ -658,10 +811,6 @@ event snapshot_vtu (t += DT; t <= T_END) {
     }
     
     fprintf(fp, "      </CellData>\n"); 
-
-    fprintf(fp, "        <DataArray type=\"Float64\" Name=\"HRR\" format=\"ascii\">\n");
-    foreach() fprintf(fp, "%.8g\n", HRR[]);
-    fprintf(fp, "        </DataArray>\n");  
 
     // --- CONNECTIVITY ---
     fprintf(fp, "      <Cells>\n");
@@ -701,7 +850,6 @@ event snapshot_vtu (t += DT; t <= T_END) {
             fprintf(fpvtu, "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n");
             fprintf(fpvtu, "  <PUnstructuredGrid GhostLevel=\"0\">\n");
             
-          
             fprintf(fpvtu, "    <PPoints>\n");
             fprintf(fpvtu, "      <PDataArray type=\"Float64\" Name=\"Points\" NumberOfComponents=\"3\" format=\"ascii\"/>\n");
             fprintf(fpvtu, "    </PPoints>\n");
@@ -710,6 +858,8 @@ event snapshot_vtu (t += DT; t <= T_END) {
             fprintf(fpvtu, "      <PDataArray type=\"Float64\" Name=\"T\" format=\"ascii\"/>\n");
             fprintf(fpvtu, "      <PDataArray type=\"Float64\" Name=\"U\" NumberOfComponents=\"3\" format=\"ascii\"/>\n");
             fprintf(fpvtu, "      <PDataArray type=\"Float64\" Name=\"HRR\" format=\"ascii\"/>\n");
+            fprintf(fpvtu, "      <PDataArray type=\"Float64\" Name=\"wdot_CH4\" format=\"ascii\"/>\n");
+            fprintf(fpvtu, "      <PDataArray type=\"Float64\" Name=\"S_local\" format=\"ascii\"/>\n");
             
             // Synchronisation du nommage XML pour le fichier maître
             for (int s = 0; s < NS; s++) {
@@ -729,7 +879,7 @@ event snapshot_vtu (t += DT; t <= T_END) {
         }
     }
     
-    return 0; // Conformité avec l'architecture Basilisk
+    return 0; 
 }
 
 // Video Output
