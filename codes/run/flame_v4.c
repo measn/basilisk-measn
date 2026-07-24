@@ -13,12 +13,12 @@
 
 
 // --- Physical and Domain Parameters ---
-#define DOMAIN_SIZE     60e-3        // Domain width/height (meters)
-#define MAX_LEVEL       12            // Maximum grid refinement level
+#define DOMAIN_SIZE     20-3        // Domain width/height (meters)
+#define MAX_LEVEL       10            // Maximum grid refinement level
 #define MIN_LEVEL       7            // Minimum grid refinement level
 
 // --- Simulation Constants ---
-#define T_END           0.5         // Final time (seconds)
+#define T_END           0.005         // Final time (seconds)
 #define CFL_MAX         0.2         // Stability criterion
 #define P_ATM           101325.0     // Atmospheric pressure (Pa)
 #define T_INITIAL       300.0        // Initial gas temperature (K)
@@ -37,9 +37,9 @@
 // ===================================================================
 // --- Paramètres de Stratification (Config 3) ---
 // ===================================================================
-#define PHI_BOTTOM 10.0     
+#define PHI_BOTTOM 5.0     
 #define PHI_TOP    0.0      
-#define Y_STRAT    50e-3    
+#define Y_STRAT    20e-3    
 
 // --- valeurs pour les conditions aux limites ---
 #define MASS_TOT_B (16.04 * (PHI_BOTTOM) + 274.654)
