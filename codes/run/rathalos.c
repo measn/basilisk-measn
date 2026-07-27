@@ -44,11 +44,11 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 
 // --- Physical and Domain Parameters ---
 #define DOMAIN_SIZE     20e-3        // Domain width/height (meters)
-#define MAX_LEVEL       10           // Maximum grid refinement level
+#define MAX_LEVEL       9           // Maximum grid refinement level
 #define MIN_LEVEL       7            // Minimum grid refinement level
 
 // --- Simulation Constants ---
-#define T_END           0.008       // Final time (seconds)
+#define T_END           0.050       // Final time (seconds)
 #define DT              0.0001       // Log interval
 #define CFL_MAX         0.2          // Stability criterion
 #define P_ATM           101325.0     // Atmospheric pressure (Pa)
@@ -58,13 +58,13 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 #define V_INJ           0.0          // Injection speed (m/s) 
 #define F_FUEL          1            // Fuel Ratio
 #define T_RESIDENCE     0.002        // Time residency of the flame
-#define Y_flame         5e-3         // Position of the ignition flame on the Y axis (meters)
-#define X_FLAME         2e-3         // Position of the ignition flame on the X axis (meters)
-#define R_FLAME         2.5e-3         // Radius of the spherical flame (meters)
+#define Y_flame         8e-3         // Position of the ignition flame on the Y axis (meters)
+#define X_FLAME         0         // Position of the ignition flame on the X axis (meters)
+#define R_FLAME         2e-3         // Radius of the spherical flame (meters)
 
 // --- Stratification Parameters (Config 3) ---
-#define PHI_BOTTOM 0.6     // Bottom boundary richness
-#define PHI_TOP    2.0     // Richness at Y_STRAT
+#define PHI_BOTTOM 2.5     // Bottom boundary richness
+#define PHI_TOP    0     // Richness at Y_STRAT
 #define Y_STRAT    20e-3   // height for the stratification
 
 #define AIR_N2_O2_RATIO (0.79 / 0.21) // Molar ratio of N2 to O2 in standard air
@@ -397,70 +397,83 @@ int main (int argc, char ** argv) {
 }
 
 // ===================================================================
-// --- Initialisation ---
+// --- Initialization Event ---
 // ===================================================================
 
 event init_0 (i = 0) {
-  scalar T = gas->T;
+  // 1. Access Basilisk scalar fields strictly through the multiphase structure
+  scalar T_gas = gas->T;
   scalar * YList = gas->YList;
 
-  double T_bg = T_INITIAL;
-  double Y_bg[NS];
-  for (int s = 0; s < NS; s++) {
-      Y_bg[s] = 0.0;
-  }
+  // Extract species indices using the Cantera C-interface wrapper[cite: 3]
+  int iFUEL = index_species(FUEL_NAME);
+  int iO2   = index_species("O2");
+  int iN2   = index_species("N2");
 
-  int iFUEL = -1, iO2 = -1, iN2 = -1;
-  for (int s = 0; s < NS; s++) {
-      if (strcmp(gas_species[s], FUEL_NAME) == 0) iFUEL = s;
-      if (strcmp(gas_species[s], "O2")  == 0) iO2 = s;
-      if (strcmp(gas_species[s], "N2")  == 0) iN2 = s;
-  }
+  // Define core radius and flame brush thickness for a physical ignition kernel
+  // R_core represents the inner core of fully burned gases (zero spatial gradient)
+  double R_core = 0.4 * R_FLAME;                  
+  double flame_thickness = R_FLAME - R_core;      
+  
+  // End of the 1D profile corresponding to the burned thermodynamic state
+  double x_max_csv = flame_prof.x[flame_prof.n_points - 1]; 
 
-  if (BG_CONFIG == 1) { 
-      T_bg = 300.0; 
-      if (iFUEL != -1) Y_bg[iFUEL] = Y_FUEL_STOICH;
-      if (iO2  != -1)  Y_bg[iO2]   = Y_O2_STOICH;
-      if (iN2  != -1)  Y_bg[iN2]   = Y_N2_STOICH;
-  } 
-  else if (BG_CONFIG == 2) { 
-      T_bg = 300.0;
-      if (iO2  != -1) Y_bg[iO2]  = Y_O2_AIR;
-      if (iN2  != -1) Y_bg[iN2]  = Y_N2_AIR;
-  }
-  else if (BG_CONFIG == 0) { 
-      T_bg = flame_prof.T[0];
-      for (int s = 0; s < NS; s++) {
-          Y_bg[s] = flame_prof.Y[s][0];
-      }
-  }
-
+  // 2. Initialize the background field and map the ignition kernel
   foreach() { 
-      double T_loc;
+      double T_loc = T_INITIAL;
       double Y_loc[NS];
       
+      // Establish background composition (stratified or homogeneous fresh mixture)
       if (BG_CONFIG == 3) {
-          T_loc = 300.0;
-          double phi;
-          
+          double phi_local_bg;
           if (y <= Y_STRAT) {
-              phi = PHI_BOTTOM - (PHI_BOTTOM - PHI_TOP) * (y / Y_STRAT);
+              phi_local_bg = PHI_BOTTOM - (PHI_BOTTOM - PHI_TOP) * (y / Y_STRAT);
           } else {
-              phi = PHI_TOP;
+              phi_local_bg = PHI_TOP;
           }
-          
-          if (phi < 0.0) phi = 0.0;
-          
-          get_Y_from_atomic_phi(phi, iFUEL, iO2, iN2, Y_loc);
+          if (phi_local_bg < 0.0) phi_local_bg = 0.0;
+          get_Y_from_atomic_phi(phi_local_bg, iFUEL, iO2, iN2, Y_loc);
+      } else {
+          // Default initialization for homogeneous background
+          for (int s = 0; s < NS; s++) Y_loc[s] = 0.0;
+          if (iFUEL != -1) Y_loc[iFUEL] = Y_FUEL_STOICH;
+          if (iO2 != -1)   Y_loc[iO2]   = Y_O2_STOICH;
+          if (iN2 != -1)   Y_loc[iN2]   = Y_N2_STOICH;
       }
-      else {
-          T_loc = T_bg;
+      
+      // Compute radial distance from the exact ignition center
+      double r = sqrt(sq(x - X_FLAME) + sq(y - Y_flame));
+      bool in_flame = false;
+      double x_csv = 0.0;
+
+      // Map the physically consistent flame kernel geometry
+      if (IGN_CONFIG == 0 && r <= R_FLAME && x >= 0.0) {
+          if (r <= R_core) {
+              x_csv = x_max_csv; // Inner core: zero spatial gradient
+          } else {
+              x_csv = (r - R_core) / flame_thickness * x_max_csv; // Reaction layer
+          }
+          in_flame = true;
+      } 
+      else if (IGN_CONFIG == 1 && x <= X_FLAME && x >= 0.0) {
+          in_flame = true; 
+          x_csv = X_FLAME - x; // Vertical linear flame
+      }
+      else if (IGN_CONFIG == 2 && y >= Y_flame) {
+          in_flame = true; 
+          x_csv = y - Y_flame; // Horizontal linear flame
+      }
+
+      // Interpolate thermodynamic state and mass fractions from 1D profile
+      if (in_flame) {
+          T_loc = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
           for (int s = 0; s < NS; s++) {
-              Y_loc[s] = Y_bg[s];
+              Y_loc[s] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
           }
       }
       
-      T[] = T_loc;
+      // Assign local computations to the Basilisk scalar fields
+      T_gas[] = T_loc;
       for (int s = 0; s < NS; s++) {
           scalar Y = YList[s];
           Y[] = Y_loc[s];
@@ -473,13 +486,17 @@ event init_0 (i = 0) {
 
   boundary((scalar *){u.x, u.y, p});
 
+  // Apply gradient limiters for scalars to avoid spurious numerical oscillations
   for (scalar s in YList) {
       s.gradient = minmod2;
   }
-  T.gradient = minmod2;
+  T_gas.gradient = minmod2;
 
+  // 3. Apply Boundary Conditions using strictly global variables
+  // Avoid injecting dynamically allocated local arrays inside dirichlet macros 
+  // to prevent qcc extraction errors in _boundary functions.
   if (BG_CONFIG == 1 || BG_CONFIG == 2 || BG_CONFIG == 3) {
-      T[bottom] = dirichlet(300.0); 
+      T_gas[bottom] = dirichlet(300.0); 
 
       for (int s = 0; s < NS; s++) {
           scalar Y = YList[s];
@@ -501,55 +518,28 @@ event init_0 (i = 0) {
           }
       } 
   }
-  
-  double center_y = Y_flame; 
-  foreach() {
-      bool in_flame = false;
-      double x_csv = 0.0;
 
-      if (IGN_CONFIG == 0) {
-          double r = sqrt(sq(x) + sq(y - center_y));
-          if (r <= R_FLAME && x >= 0.0) { 
-              in_flame = true; 
-              x_csv = R_FLAME - r; 
-          }
-      } 
-      else if (IGN_CONFIG == 1) {
-          if (x <= X_FLAME && x >= 0.0) { 
-              in_flame = true; 
-              x_csv = X_FLAME - x; 
-          }
-      }
-      else if (IGN_CONFIG == 2) {
-          if (y >= center_y) { 
-              in_flame = true; 
-              x_csv = y - center_y; 
-          }
-      }
-
-      if (in_flame) {
-          T[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
-          for (int s = 0; s < NS; s++) {
-              scalar Y = YList[s];
-              Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
-          }
-      }
-  }
-
-  boundary({T}); 
+  boundary({T_gas}); 
   boundary(YList); 
+  
+  // Ensure mass fractions sum strictly to 1.0 safely
   sanitize_fractions(YList); 
+  
+  // 4. Update phase properties and prepare Low-Mach divergence fields
+  // Triggers calculation of density via cantera_gasprop_density (ideal gas law)
   event("properties"); 
-
+  
+  // Safely initialize the density variation source terms to zero
   foreach() {
-      if (rho[] < 0.01) { 
-          rho[] = 1.0; 
+      for (scalar drhodt_s in drhodtlist) {
+          drhodt_s[] = 0.;
       }
   }
-  foreach_face() {
-      alpha.x[] = 1.0 / ((rho[] + rho[-1]) / 2.0); 
+
+  // Protect I/O operations for HPC/MPI compatibility
+  if (pid() == 0) {
+      printf("INFO: Physical flame kernel and gas phase properties initialized successfully.\n");
   }
-  boundary ((scalar *){alpha.x, alpha.y});
 }
 
 // ===================================================================
@@ -557,40 +547,79 @@ event init_0 (i = 0) {
 // ===================================================================
 
 event flame_residence (t <= T_RESIDENCE) {
-  scalar T = gas->T;
+  // 1. Access Basilisk scalar fields strictly through the gas phase structure[cite: 2]
+  scalar T_gas = gas->T;
   scalar * YList = gas->YList;
-  double center_y = Y_flame; 
 
+  // Consistency with the initial physical kernel geometry
+  double R_core = 0.4 * R_FLAME;                  
+  double flame_thickness = R_FLAME - R_core;      
+  double x_max_csv = flame_prof.x[flame_prof.n_points - 1]; 
+
+  // 2. Maintain the mapped flame profile to prevent early numerical dissipation
   foreach() {
-        bool in_flame = false;
-        double x_csv = 0.0;
+      double r = sqrt(sq(x - X_FLAME) + sq(y - Y_flame));
+      bool in_flame = false;
+      double x_csv = 0.0;
 
-        if (IGN_CONFIG == 0) {
-            double r = sqrt(sq(x) + sq(y - center_y));
-            if (r <= R_FLAME && x >= 0.0) { in_flame = true; x_csv = R_FLAME - r; }
-        } 
-        else if (IGN_CONFIG == 1) {
-            if (x <= X_FLAME && x >= 0.0) { in_flame = true; x_csv = X_FLAME - x; }
-        }
-        else if (IGN_CONFIG == 2) {
-            if (y >= center_y) { in_flame = true; x_csv = y - center_y; }
-        }
+      // Ensure exact spatial match with init_0
+      if (IGN_CONFIG == 0 && r <= R_FLAME && x >= 0.0) {
+          if (r <= R_core) {
+              x_csv = x_max_csv; 
+          } else {
+              x_csv = (r - R_core) / flame_thickness * x_max_csv; 
+          }
+          in_flame = true;
+      } 
+      else if (IGN_CONFIG == 1 && x <= X_FLAME && x >= 0.0) {
+          in_flame = true; 
+          x_csv = X_FLAME - x; 
+      }
+      else if (IGN_CONFIG == 2 && y >= Y_flame) {
+          in_flame = true; 
+          x_csv = y - Y_flame; 
+      }
 
-        if (in_flame) {
-            T[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
-            for (int s = 0; s < NS; s++) {
-                scalar Y = YList[s];
-                Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
-            }
-        }
-    }
+      if (in_flame) {
+          T_gas[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
+          for (int s = 0; s < NS; s++) {
+              scalar Y = YList[s];
+              Y[] = interpolate_1D(x_csv, flame_prof.x, flame_prof.Y[s], flame_prof.n_points);
+          }
+      }
+  }
 
-  boundary({T}); boundary(YList); sanitize_fractions(YList);
-  event("properties"); 
+  boundary({T_gas}); 
+  boundary(YList); 
   
-  foreach() if (rho[] < 0.01) rho[] = 1.0; 
-  foreach_face() alpha.x[] = 1.0 / ((rho[] + rho[-1]) / 2.0); 
+  // Ensure local mass fractions sum strictly to 1.0 safely
+  sanitize_fractions(YList);
+
+  // 3. Trigger thermodynamic properties update 
+  // This computes the updated density via cantera_gasprop_density based on the new T and Y fields[cite: 5]
+  event("properties"); 
+
+  // 4. Reset Low-Mach divergence sources to avoid spurious expansion during forced residency[cite: 6]
+  foreach() {
+      for (scalar drhodt_s in drhodtlist) {
+          drhodt_s[] = 0.;
+      }
+  }
+  
+  // Apply explicit safeguards for the density-based solver projection step
+  foreach() {
+      if (rho[] < 0.01) {
+          rho[] = 1.0;
+      }
+  }
+  
+  // Update specific volume face field required by the Poisson solver
+  foreach_face() {
+      alpha.x[] = 1.0 / ((rho[] + rho[-1]) / 2.0); 
+  }
   boundary ((scalar *){alpha.x, alpha.y});
+  
+  // Implicit void return for event signature compliance
 }
 
 // =================================================================
