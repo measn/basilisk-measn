@@ -34,7 +34,7 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 // 0 = Half sphere flame
 // 1 = Linear vertical flame
 // 2 = Linear horizontal flame
-#define IGN_CONFIG 0
+#define IGN_CONFIG 1
 
 // WALL_CONFIG : Boundary conditions (left and right)
 // 0 = closed 
@@ -43,12 +43,12 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 
 
 // --- Physical and Domain Parameters ---
-#define DOMAIN_SIZE     20e-3        // Domain width/height (meters)
-#define MAX_LEVEL       9           // Maximum grid refinement level
+#define DOMAIN_SIZE     40e-3        // Domain width/height (meters)
+#define MAX_LEVEL       10           // Maximum grid refinement level
 #define MIN_LEVEL       7            // Minimum grid refinement level
 
 // --- Simulation Constants ---
-#define T_END           0.050       // Final time (seconds)
+#define T_END           0.080       // Final time (seconds)
 #define DT              0.0001       // Log interval
 #define CFL_MAX         0.2          // Stability criterion
 #define P_ATM           101325.0     // Atmospheric pressure (Pa)
@@ -57,15 +57,16 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 // --- Simulation Parameters ---
 #define V_INJ           0.0          // Injection speed (m/s) 
 #define F_FUEL          1            // Fuel Ratio
-#define T_RESIDENCE     0.002        // Time residency of the flame
+#define T_RESIDENCE     0.0        // Time residency of the flame
 #define Y_flame         8e-3         // Position of the ignition flame on the Y axis (meters)
-#define X_FLAME         0         // Position of the ignition flame on the X axis (meters)
+#define X_FLAME         1e-3            // Position of the ignition flame on the X axis (meters)
 #define R_FLAME         2e-3         // Radius of the spherical flame (meters)
+#define H_FLAME         10e-3
 
 // --- Stratification Parameters (Config 3) ---
 #define PHI_BOTTOM 2.5     // Bottom boundary richness
 #define PHI_TOP    0     // Richness at Y_STRAT
-#define Y_STRAT    20e-3   // height for the stratification
+#define Y_STRAT    10e-3   // height for the stratification
 
 #define AIR_N2_O2_RATIO (0.79 / 0.21) // Molar ratio of N2 to O2 in standard air
 
@@ -401,24 +402,26 @@ int main (int argc, char ** argv) {
 // ===================================================================
 
 event init_0 (i = 0) {
-  // 1. Access Basilisk scalar fields strictly through the multiphase structure
+  // Access Basilisk scalar fields strictly through the multiphase gas structure[cite: 3]
   scalar T_gas = gas->T;
   scalar * YList = gas->YList;
 
-  // Extract species indices using the Cantera C-interface wrapper[cite: 3]
+  // Extract species indices using the Cantera C-interface wrapper[cite: 4]
   int iFUEL = index_species(FUEL_NAME);
   int iO2   = index_species("O2");
   int iN2   = index_species("N2");
 
-  // Define core radius and flame brush thickness for a physical ignition kernel
-  // R_core represents the inner core of fully burned gases (zero spatial gradient)
+  // Define geometric parameters for the physical ignition kernels
   double R_core = 0.4 * R_FLAME;                  
-  double flame_thickness = R_FLAME - R_core;      
+  double flame_thickness_0 = R_FLAME - R_core;      
   
-  // End of the 1D profile corresponding to the burned thermodynamic state
+  // Specific geometric constraints for the vertical linear flame (Config 1)
+  double X_core = 0.4 * X_FLAME; 
+  double flame_thickness_1 = X_FLAME - X_core;
+  
+  // End of the 1D profile corresponding to the fully burned thermodynamic state
   double x_max_csv = flame_prof.x[flame_prof.n_points - 1]; 
 
-  // 2. Initialize the background field and map the ignition kernel
   foreach() { 
       double T_loc = T_INITIAL;
       double Y_loc[NS];
@@ -434,37 +437,64 @@ event init_0 (i = 0) {
           if (phi_local_bg < 0.0) phi_local_bg = 0.0;
           get_Y_from_atomic_phi(phi_local_bg, iFUEL, iO2, iN2, Y_loc);
       } else {
-          // Default initialization for homogeneous background
           for (int s = 0; s < NS; s++) Y_loc[s] = 0.0;
           if (iFUEL != -1) Y_loc[iFUEL] = Y_FUEL_STOICH;
           if (iO2 != -1)   Y_loc[iO2]   = Y_O2_STOICH;
           if (iN2 != -1)   Y_loc[iN2]   = Y_N2_STOICH;
       }
       
-      // Compute radial distance from the exact ignition center
-      double r = sqrt(sq(x - X_FLAME) + sq(y - Y_flame));
       bool in_flame = false;
       double x_csv = 0.0;
 
-      // Map the physically consistent flame kernel geometry
-      if (IGN_CONFIG == 0 && r <= R_FLAME && x >= 0.0) {
-          if (r <= R_core) {
-              x_csv = x_max_csv; // Inner core: zero spatial gradient
-          } else {
-              x_csv = (r - R_core) / flame_thickness * x_max_csv; // Reaction layer
+      // ---------------------------------------------------------
+      // CONFIG 0: Spherical Flame
+      // ---------------------------------------------------------
+      if (IGN_CONFIG == 0) {
+          double r = sqrt(sq(x - X_FLAME) + sq(y - Y_flame));
+          if (r <= R_FLAME && x >= 0.0) {
+              if (r <= R_core) {
+                  x_csv = x_max_csv; 
+              } else {
+                  x_csv = (r - R_core) / flame_thickness_0 * x_max_csv; 
+              }
+              in_flame = true;
           }
-          in_flame = true;
       } 
-      else if (IGN_CONFIG == 1 && x <= X_FLAME && x >= 0.0) {
-          in_flame = true; 
-          x_csv = X_FLAME - x; // Vertical linear flame
+      // ---------------------------------------------------------
+      // CONFIG 1: Vertical Linear Flame (Wall) with Tip Smoothing
+      // ---------------------------------------------------------
+      else if (IGN_CONFIG == 1 && x >= 0.0) {
+          if (y <= H_FLAME) {
+              // Main body of the vertical flame
+              if (x <= X_core) {
+                  x_csv = x_max_csv; // Burned gas core enforcing zero gradient
+                  in_flame = true;
+              } else if (x <= X_FLAME) {
+                  double r_side = x - X_core;
+                  x_csv = (flame_thickness_1 - r_side) / flame_thickness_1 * x_max_csv;
+                  in_flame = true;
+              }
+          } else {
+              // Smooth radial closure at the tip of the flame to avoid infinite gradients
+              double dy = y - H_FLAME;
+              double dx = (x > X_core) ? (x - X_core) : 0.0;
+              double r_tip = sqrt(sq(dx) + sq(dy));
+              
+              if (r_tip <= flame_thickness_1) {
+                  x_csv = (flame_thickness_1 - r_tip) / flame_thickness_1 * x_max_csv;
+                  in_flame = true;
+              }
+          }
       }
+      // ---------------------------------------------------------
+      // CONFIG 2: Horizontal Linear Flame
+      // ---------------------------------------------------------
       else if (IGN_CONFIG == 2 && y >= Y_flame) {
           in_flame = true; 
-          x_csv = y - Y_flame; // Horizontal linear flame
+          x_csv = y - Y_flame; 
       }
 
-      // Interpolate thermodynamic state and mass fractions from 1D profile
+      // Interpolate thermodynamic state and mass fractions from the 1D profile
       if (in_flame) {
           T_loc = interpolate_1D(x_csv, flame_prof.x, flame_prof.T, flame_prof.n_points);
           for (int s = 0; s < NS; s++) {
@@ -472,7 +502,7 @@ event init_0 (i = 0) {
           }
       }
       
-      // Assign local computations to the Basilisk scalar fields
+      // Assign local computations to the Basilisk phase scalar fields[cite: 3]
       T_gas[] = T_loc;
       for (int s = 0; s < NS; s++) {
           scalar Y = YList[s];
@@ -492,9 +522,7 @@ event init_0 (i = 0) {
   }
   T_gas.gradient = minmod2;
 
-  // 3. Apply Boundary Conditions using strictly global variables
-  // Avoid injecting dynamically allocated local arrays inside dirichlet macros 
-  // to prevent qcc extraction errors in _boundary functions.
+  // Apply Boundary Conditions using strictly global variables
   if (BG_CONFIG == 1 || BG_CONFIG == 2 || BG_CONFIG == 3) {
       T_gas[bottom] = dirichlet(300.0); 
 
@@ -525,20 +553,23 @@ event init_0 (i = 0) {
   // Ensure mass fractions sum strictly to 1.0 safely
   sanitize_fractions(YList); 
   
-  // 4. Update phase properties and prepare Low-Mach divergence fields
-  // Triggers calculation of density via cantera_gasprop_density (ideal gas law)
+  // Trigger calculation of density via cantera_gasprop_density 
   event("properties"); 
   
   // Safely initialize the density variation source terms to zero
+  // to avoid numerical shocks during the projection step[cite: 7]
   foreach() {
       for (scalar drhodt_s in drhodtlist) {
           drhodt_s[] = 0.;
+      }
+      for (scalar intexp_s in intexplist) {
+          intexp_s[] = 0.;
       }
   }
 
   // Protect I/O operations for HPC/MPI compatibility
   if (pid() == 0) {
-      printf("INFO: Physical flame kernel and gas phase properties initialized successfully.\n");
+      printf("INFO: Physical flame kernel initialized successfully.\n");
   }
 }
 
@@ -547,34 +578,56 @@ event init_0 (i = 0) {
 // ===================================================================
 
 event flame_residence (t <= T_RESIDENCE) {
-  // 1. Access Basilisk scalar fields strictly through the gas phase structure[cite: 2]
+  // Access phase scalar fields[cite: 3]
   scalar T_gas = gas->T;
   scalar * YList = gas->YList;
 
   // Consistency with the initial physical kernel geometry
   double R_core = 0.4 * R_FLAME;                  
-  double flame_thickness = R_FLAME - R_core;      
+  double flame_thickness_0 = R_FLAME - R_core;      
+  
+  double X_core = 0.4 * X_FLAME; 
+  double flame_thickness_1 = X_FLAME - X_core;
+  
   double x_max_csv = flame_prof.x[flame_prof.n_points - 1]; 
 
-  // 2. Maintain the mapped flame profile to prevent early numerical dissipation
+  // Maintain the mapped flame profile dynamically
   foreach() {
-      double r = sqrt(sq(x - X_FLAME) + sq(y - Y_flame));
       bool in_flame = false;
       double x_csv = 0.0;
 
-      // Ensure exact spatial match with init_0
-      if (IGN_CONFIG == 0 && r <= R_FLAME && x >= 0.0) {
-          if (r <= R_core) {
-              x_csv = x_max_csv; 
-          } else {
-              x_csv = (r - R_core) / flame_thickness * x_max_csv; 
+      // CONFIG 0: Spherical Flame
+      if (IGN_CONFIG == 0) {
+          double r = sqrt(sq(x - X_FLAME) + sq(y - Y_flame));
+          if (r <= R_FLAME && x >= 0.0) {
+              if (r <= R_core) { x_csv = x_max_csv; } 
+              else { x_csv = (r - R_core) / flame_thickness_0 * x_max_csv; }
+              in_flame = true;
           }
-          in_flame = true;
       } 
-      else if (IGN_CONFIG == 1 && x <= X_FLAME && x >= 0.0) {
-          in_flame = true; 
-          x_csv = X_FLAME - x; 
+      // CONFIG 1: Vertical Linear Flame (Wall) with Tip Smoothing
+      else if (IGN_CONFIG == 1 && x >= 0.0) {
+          if (y <= H_FLAME) {
+              if (x <= X_core) {
+                  x_csv = x_max_csv; 
+                  in_flame = true;
+              } else if (x <= X_FLAME) {
+                  double r_side = x - X_core;
+                  x_csv = (flame_thickness_1 - r_side) / flame_thickness_1 * x_max_csv;
+                  in_flame = true;
+              }
+          } else {
+              double dy = y - H_FLAME;
+              double dx = (x > X_core) ? (x - X_core) : 0.0;
+              double r_tip = sqrt(sq(dx) + sq(dy));
+              
+              if (r_tip <= flame_thickness_1) {
+                  x_csv = (flame_thickness_1 - r_tip) / flame_thickness_1 * x_max_csv;
+                  in_flame = true;
+              }
+          }
       }
+      // CONFIG 2: Horizontal Linear Flame
       else if (IGN_CONFIG == 2 && y >= Y_flame) {
           in_flame = true; 
           x_csv = y - Y_flame; 
@@ -592,34 +645,20 @@ event flame_residence (t <= T_RESIDENCE) {
   boundary({T_gas}); 
   boundary(YList); 
   
-  // Ensure local mass fractions sum strictly to 1.0 safely
   sanitize_fractions(YList);
 
-  // 3. Trigger thermodynamic properties update 
-  // This computes the updated density via cantera_gasprop_density based on the new T and Y fields[cite: 5]
+  // Trigger thermodynamic properties update 
   event("properties"); 
 
-  // 4. Reset Low-Mach divergence sources to avoid spurious expansion during forced residency[cite: 6]
+  // Reset Low-Mach divergence sources to avoid spurious expansion[cite: 7]
   foreach() {
       for (scalar drhodt_s in drhodtlist) {
           drhodt_s[] = 0.;
       }
-  }
-  
-  // Apply explicit safeguards for the density-based solver projection step
-  foreach() {
-      if (rho[] < 0.01) {
-          rho[] = 1.0;
+      for (scalar intexp_s in intexplist) {
+          intexp_s[] = 0.;
       }
   }
-  
-  // Update specific volume face field required by the Poisson solver
-  foreach_face() {
-      alpha.x[] = 1.0 / ((rho[] + rho[-1]) / 2.0); 
-  }
-  boundary ((scalar *){alpha.x, alpha.y});
-  
-  // Implicit void return for event signature compliance
 }
 
 // =================================================================
@@ -775,9 +814,9 @@ event compute_phi (i++) {
     boundary({phi_local});
 }
 
-// =================================================================
-// --- Monitoring Logs ---
-// =================================================================
+// ===================================================================
+// --- Monitoring Logs (Original Implementation) ---
+// ===================================================================
 
 event logfile (i += 10) { 
     double T_max = -HUGE, T_min = HUGE;
@@ -817,12 +856,8 @@ event logfile (i += 10) {
         
         double avg_Y = sum_Y / (double)grid->tn; 
         
-        // 1. Output minimal real-time monitoring to the standard error stream
-        // fprintf(ferr, "[%s] i: %-5d | t: %-8.4g | dt: %-8.4g | T_max: %.0f K | dP_max: %.2f Pa\n", 
-                // time_buffer, i, t, dt, T_max, P_max);
-        // fflush(ferr); // Flush buffer to ensure logs are preserved upon crash
-
-        FILE * fp = fopen("detailed_log.txt", "a");
+        // Truncate and initialize file at i = 0, then append for subsequent iterations
+        FILE * fp = fopen("log.txt", (i == 0) ? "w" : "a");
         if (fp != NULL) {
             fprintf(fp, 
                 "[%s] i: %-5d | t: %-8.4g | dt: %-8.4g | Cells(Tot/Loc): %ld / %ld | T: %.0f/%.0f K | P_dyn: %.2f/%.2f Pa | Div: %e | AvgY: %.4f\n", 
