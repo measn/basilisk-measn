@@ -30,6 +30,14 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 // 3 = Stratified mix (vertical richness gradient)
 #define BG_CONFIG 3
 
+// STRAT_PROFILE: Stratification profile configuration
+// 0 = Linear, 1 = Exponential, 2 = Logarithmic
+#define STRAT_PROFILE 1       
+
+// STRAT_CURVATURE: Tuning parameter for the intensity of the gradient curvature
+// Must be strictly positive (e.g., 5.0)
+#define STRAT_CURVATURE 5.0
+
 // IGN_CONFIG : Ignition Geometry 
 // 0 = Half sphere flame
 // 1 = Linear vertical flame
@@ -402,11 +410,11 @@ int main (int argc, char ** argv) {
 // ===================================================================
 
 event init_0 (i = 0) {
-  // Access Basilisk scalar fields strictly through the multiphase gas structure[cite: 3]
+  // Access Basilisk scalar fields strictly through the multiphase gas structure[cite: 2]
   scalar T_gas = gas->T;
   scalar * YList = gas->YList;
 
-  // Extract species indices using the Cantera C-interface wrapper[cite: 4]
+  // Extract species indices using the Cantera C-interface wrapper[cite: 3]
   int iFUEL = index_species(FUEL_NAME);
   int iO2   = index_species("O2");
   int iN2   = index_species("N2");
@@ -430,12 +438,33 @@ event init_0 (i = 0) {
       if (BG_CONFIG == 3) {
           double phi_local_bg;
           if (y <= Y_STRAT) {
-              phi_local_bg = PHI_BOTTOM - (PHI_BOTTOM - PHI_TOP) * (y / Y_STRAT);
+              double y_star = y / Y_STRAT;
+              double delta_phi = PHI_TOP - PHI_BOTTOM;
+              
+              if (STRAT_PROFILE == 0) { 
+                  // Linear distribution
+                  phi_local_bg = PHI_BOTTOM + delta_phi * y_star;
+              } 
+              else if (STRAT_PROFILE == 1) { 
+                  // Exponential distribution
+                  phi_local_bg = PHI_BOTTOM + delta_phi * 
+                                 (exp(STRAT_CURVATURE * y_star) - 1.0) / 
+                                 (exp(STRAT_CURVATURE) - 1.0);
+              } 
+              else if (STRAT_PROFILE == 2) { 
+                  // Logarithmic distribution
+                  phi_local_bg = PHI_BOTTOM + delta_phi * 
+                                 log(1.0 + STRAT_CURVATURE * y_star) / 
+                                 log(1.0 + STRAT_CURVATURE);
+              }
           } else {
               phi_local_bg = PHI_TOP;
           }
-          if (phi_local_bg < 0.0) phi_local_bg = 0.0;
+          
+          // Physical clipping to prevent non-physical equivalence ratios
+          phi_local_bg = max(0.0, phi_local_bg);
           get_Y_from_atomic_phi(phi_local_bg, iFUEL, iO2, iN2, Y_loc);
+          
       } else {
           for (int s = 0; s < NS; s++) Y_loc[s] = 0.0;
           if (iFUEL != -1) Y_loc[iFUEL] = Y_FUEL_STOICH;
@@ -502,7 +531,7 @@ event init_0 (i = 0) {
           }
       }
       
-      // Assign local computations to the Basilisk phase scalar fields[cite: 3]
+      // Assign local computations to the Basilisk phase scalar fields[cite: 2]
       T_gas[] = T_loc;
       for (int s = 0; s < NS; s++) {
           scalar Y = YList[s];
@@ -522,7 +551,7 @@ event init_0 (i = 0) {
   }
   T_gas.gradient = minmod2;
 
-  // Apply Boundary Conditions using strictly global variables
+  // Apply Boundary Conditions using strictly global variables to avoid qcc extraction errors
   if (BG_CONFIG == 1 || BG_CONFIG == 2 || BG_CONFIG == 3) {
       T_gas[bottom] = dirichlet(300.0); 
 
@@ -553,11 +582,11 @@ event init_0 (i = 0) {
   // Ensure mass fractions sum strictly to 1.0 safely
   sanitize_fractions(YList); 
   
-  // Trigger calculation of density via cantera_gasprop_density 
+  // Trigger calculation of density via cantera_gasprop_density to satisfy the ideal gas law[cite: 5]
   event("properties"); 
   
   // Safely initialize the density variation source terms to zero
-  // to avoid numerical shocks during the projection step[cite: 7]
+  // Prevents non-physical expansion spikes in the Low-Mach projection step[cite: 6]
   foreach() {
       for (scalar drhodt_s in drhodtlist) {
           drhodt_s[] = 0.;
@@ -569,7 +598,7 @@ event init_0 (i = 0) {
 
   // Protect I/O operations for HPC/MPI compatibility
   if (pid() == 0) {
-      printf("INFO: Physical flame kernel initialized successfully.\n");
+      printf("INFO: Physical flame kernel and stratified background initialized successfully.\n");
   }
 }
 
