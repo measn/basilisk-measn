@@ -28,11 +28,11 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 // 1 = Injection of premixed fuel (phi=1) from the bottom
 // 2 = Injection of fuel (not mixed) from the bottom
 // 3 = Stratified mix (vertical richness gradient)
-#define BG_CONFIG 3
+#define BG_CONFIG 2
 
 // STRAT_PROFILE: Stratification profile configuration
 // 0 = Linear, 1 = Exponential, 2 = Logarithmic
-#define STRAT_PROFILE 1       
+#define STRAT_PROFILE 0       
 
 // STRAT_CURVATURE: Tuning parameter for the intensity of the gradient curvature
 // Must be strictly positive (e.g., 5.0)
@@ -42,7 +42,7 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 // 0 = Half sphere flame
 // 1 = Linear vertical flame
 // 2 = Linear horizontal flame
-#define IGN_CONFIG 1
+#define IGN_CONFIG 0
 
 // WALL_CONFIG : Boundary conditions (left and right)
 // 0 = closed 
@@ -56,7 +56,7 @@ This case tries to reproduce the flame runner configuration found at l'Institut 
 #define MIN_LEVEL       7            // Minimum grid refinement level
 
 // --- Simulation Constants ---
-#define T_END           0.080       // Final time (seconds)
+#define T_END           0.005       // Final time (seconds)
 #define DT              0.0001       // Log interval
 #define CFL_MAX         0.2          // Stability criterion
 #define P_ATM           101325.0     // Atmospheric pressure (Pa)
@@ -104,6 +104,10 @@ double * atoms_C = NULL;
 double * atoms_H = NULL;
 double * atoms_O = NULL;
 double * MW_array = NULL;
+
+double T_EVAP       = 300.0;    // Liquid pool surface temperature [K]
+double Y_SAT_FUEL   = 0.07;     // Estimated saturated mass fraction at T_EVAP
+double V_INJ_STEFAN = 0.005;    // Fixed approximation of the Stefan flow velocity [m/s]
 
 // Helper function to compute mass fractions from the atomic equivalence ratio (Bilger fraction basis)
 void get_Y_from_atomic_phi(double phi_target, int iFUEL, int iO2, int iN2, double * Y_res) {
@@ -155,7 +159,7 @@ void get_Y_from_atomic_phi(double phi_target, int iFUEL, int iO2, int iN2, doubl
 #if BG_CONFIG == 0 || BG_CONFIG == 3
   u.n[bottom] = dirichlet( 0. ); 
 #else
-  u.n[bottom] = dirichlet( V_INJ ); 
+  u.n[bottom] = dirichlet(V_INJ_STEFAN);
 #endif
 u.t[bottom] = dirichlet( 0. );     
 p[bottom]   = neumann( 0. );       
@@ -406,15 +410,15 @@ int main (int argc, char ** argv) {
 }
 
 // ===================================================================
-// --- Initialization Event ---
+// --- INITIALIZATION EVENT ---
 // ===================================================================
 
 event init_0 (i = 0) {
-  // Access Basilisk scalar fields strictly through the multiphase gas structure[cite: 2]
+  // Access Basilisk scalar fields strictly through the multiphase gas structure
   scalar T_gas = gas->T;
   scalar * YList = gas->YList;
 
-  // Extract species indices using the Cantera C-interface wrapper[cite: 3]
+  // Extract species indices using the Cantera C-interface wrapper
   int iFUEL = index_species(FUEL_NAME);
   int iO2   = index_species("O2");
   int iN2   = index_species("N2");
@@ -531,7 +535,7 @@ event init_0 (i = 0) {
           }
       }
       
-      // Assign local computations to the Basilisk phase scalar fields[cite: 2]
+      // Assign local computations to the Basilisk phase scalar fields
       T_gas[] = T_loc;
       for (int s = 0; s < NS; s++) {
           scalar Y = YList[s];
@@ -582,11 +586,11 @@ event init_0 (i = 0) {
   // Ensure mass fractions sum strictly to 1.0 safely
   sanitize_fractions(YList); 
   
-  // Trigger calculation of density via cantera_gasprop_density to satisfy the ideal gas law[cite: 5]
+  // Trigger calculation of density via cantera_gasprop_density to satisfy the ideal gas law[cite: 4]
   event("properties"); 
   
   // Safely initialize the density variation source terms to zero
-  // Prevents non-physical expansion spikes in the Low-Mach projection step[cite: 6]
+  // Prevents non-physical expansion spikes in the Low-Mach projection step[cite: 5]
   foreach() {
       for (scalar drhodt_s in drhodtlist) {
           drhodt_s[] = 0.;
@@ -596,7 +600,7 @@ event init_0 (i = 0) {
       }
   }
 
-  // Protect I/O operations for HPC/MPI compatibility
+  // Protect I/O operations for HPC/MPI compatibility[cite: 7]
   if (pid() == 0) {
       printf("INFO: Physical flame kernel and stratified background initialized successfully.\n");
   }
